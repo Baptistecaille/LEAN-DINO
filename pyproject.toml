@@ -1,0 +1,27 @@
+[project]
+name = "math-ebt"
+version = "0.1.0"
+description = "Self-supervised encoder for Lean 4 / Mathlib with kernel-certified views"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "tokenizers>=0.15",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "matplotlib>=3.10.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

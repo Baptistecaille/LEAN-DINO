@@ -1,0 +1,122 @@
+project:
+  name: math_ebt
+  run_name: dino_v0_certified
+  seed: 42
+  output_dir: outputs/dino_v0_certified
+
+data:
+  raw_dir: data/raw_full
+  splits_dir: data/splits
+  tokenizer_path: data/tokenizer/bpe.json
+  # Set from scripts/measure_corpus.py output. 512 is the working hypothesis for
+  # SOURCE-TEXT proofs; it is far too small for elaborated proof terms (see docs/DESIGN.md).
+  max_seq_len: 512
+  max_seq_len_local: 256
+  num_local_views: 4
+  # RAM-bound, not CPU-bound. The train split materializes as ~3.9GB of Python
+  # objects (2.2GB of JSON x2.7 expansion; measured at 15.5 KB/declaration), and
+  # every DataLoader worker forks that list. CPython refcounting touches each
+  # object header on first read, so copy-on-write breaks and each worker drifts
+  # toward its own full copy -- 8 workers OOM a 12.7GB Colab runtime before step 1.
+  # Rejected: @dataclass(slots=True) on Declaration, measured at 15.4 KB/decl, i.e.
+  # no gain -- the memory is the string contents, not the instance __dict__.
+  # A lazy-parsing dataset (keep byte offsets, json.loads in __getitem__) would
+  # decouple worker count from RAM; not implemented. Set 0 on RAM-constrained
+  # runtimes (e.g. 12.7GB standard Colab); 8 here targets a larger box.
+  num_workers: 8
+  # certified | naive | dropout_only  -- the three ablation arms
+  view_mode: certified
+
+model:
+  vocab_size: 32000
+  d_model: 384
+  n_layers: 6
+  n_heads: 6
+  dim_feedforward: 1536
+  dropout: 0.1
+
+dino:
+  hidden_dim: 2048
+  bottleneck_dim: 256
+  out_dim: 4096            # also try 16384
+  student_temp: 0.10
+  teacher_temp_start: 0.04
+  teacher_temp_end: 0.07
+  # Scaled with total_steps: at 10000 the teacher temperature would stay
+  # pinned at teacher_temp_start for the whole run and never reach _end.
+  teacher_temp_warmup_steps: 300
+  center_momentum: 0.9
+  ema_momentum_start: 0.996
+  ema_momentum_end: 1.0
+  # docs/DESIGN.md invariant 2: "cancelled during the first epoch" -- an ABSOLUTE
+  # duration, not a percentage of total_steps. WRONG in the previous edit of this
+  # file: freeze_last_layer_steps was set to 60 (2% of total_steps=3000), copying
+  # the ratio from the original 1000-step config, but that 2% was only correct
+  # relative to the 100k-step budget it was tuned for (2000/100000 ~= 2 epochs at
+  # that scale). One epoch here is len(train)/effective_batch ~= 261000/256 ~=
+  # 1020 steps, independent of whatever total_steps this run uses. At 60, the
+  # last layer unfroze 17x too early: all three 2026-08-12 ablation arms
+  # (metrics15_certified/naive, metrics16_ablation_dropout) show a grad_norm
+  # spike at EXACTLY step 60 followed by student_proj_std collapsing from ~0.048
+  # to ~0.003 within 70 steps and loss locking at ln(out_dim)=8.3177 (uniform
+  # output over all 4096 dims, teacher_max_prob -> 1/4096 exactly) -- the
+  # collapse this invariant exists to prevent. Fixed to ~1 real epoch, decoupled
+  # from total_steps on purpose so it can't silently drift out of proportion
+  # again if total_steps changes.
+  freeze_last_layer_steps: 1000
+
+training:
+  # Raised from 32/8 after a batch_size=128 attempt OOM'd a 40GB A100 -- 8 forward
+  # passes per sample (2 globals @512 tok + 4 locals @256 tok, student; 2 globals
+  # teacher, no-grad) means memory scales faster with batch_size than the token
+  # count alone suggests. 64/4 keeps the same effective batch (256, so identical
+  # training dynamics/schedules) while halving forward/backward launches per step
+  # vs 32/8. If this also OOMs, drop back to 32/8 rather than guessing further up.
+  batch_size: 64
+  grad_accum_steps: 4      # effective batch 256
+  # Ablation-arm budget, fixed once for certified/naive/dropout_only so the three
+  # runs share one schedule (see docs/DESIGN.md invariant 6: "a run without its
+  # ablations is not a result"). 3000 steps x effective batch 256 is ~3 epochs
+  # over the 261k-declaration train split. Chosen from a measured ~0.9 s/step
+  # (metrics-14.jsonl): 3 arms x 3000 steps ~= 2.2 h GPU total, inside a free
+  # Colab T4 session. NOT the same run as the 20k-step checkpoint this config
+  # previously described -- that run's total_steps was edited three times
+  # mid-flight (see metrics-14.jsonl: LR-floor jumps at steps 3000/5000/7000),
+  # so its *effective* schedule was never paced for 100k either. Everything
+  # below that is expressed in steps is scaled off this 3000, once, before any
+  # arm launches, specifically so that does not happen again. Kept at 3000
+  # (not extended) after the freeze_last_layer_steps fix above -- accepted
+  # trade-off: ~1020 of these 3000 steps are now the frozen first epoch, so
+  # only ~1980 steps (~2 epochs) of real post-freeze training remain, less than
+  # the ~3 epochs this budget was originally meant to buy. Cheaper to test the
+  # fix this way before committing to a larger total_steps.
+  total_steps: 3000
+  warmup_steps: 300
+  lr: 0.0005
+  weight_decay_start: 0.04
+  weight_decay_end: 0.4
+  grad_clip: 1.0
+  precision: bf16
+  log_every: 10
+  eval_every: 1500
+  # Must stay <= total_steps or the run produces no intermediate checkpoint and
+  # a disconnected Colab runtime loses everything (that is what last.pt is for).
+  save_every: 1500
+
+eval:
+  probe_num_classes: 15
+  probe_epochs: 20
+  probe_lr: 0.001
+  retrieval_top_k: [10, 100]
+
+gates:
+  cos_pos_min: 0.80
+  cos_rand_max: 0.30
+  top10_jaccard_min: 0.70
+  probe_top1_min: 0.55
+  # Scaled with total_steps. At 50000 the stability gate could never be
+  # evaluated at all. This is enough steps of metrics to run the gate, not
+  # enough to claim stability at a real phase-1 budget -- do not read a pass
+  # here as a phase-1 pass; `gates.py` also does not enforce this by actual
+  # step-count, only by whether that many post-warmup steps were logged.
+  min_stable_steps: 1500

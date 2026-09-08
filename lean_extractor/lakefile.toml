@@ -1,0 +1,11 @@
+name = "mathebt_extractor"
+defaultTargets = ["extract"]
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "master"
+
+[[lean_exe]]
+name = "extract"
+root = "Extract"

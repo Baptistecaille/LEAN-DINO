@@ -1,0 +1,18 @@
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# large / generated data (root-level only — src/math_ebt/data/ is source code)
+/data/
+/outputs/
+/model/
+
+# Lean build artifacts
+lean_extractor/.lake/
+lean_extractor/build/
+lean_extractor/lakefile.olean
+lean_extractor/*.log
